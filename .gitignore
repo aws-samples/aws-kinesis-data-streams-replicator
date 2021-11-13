@@ -1,0 +1,8 @@
+/.idea/
+/KinesisReplicatorFunction/kinesis-data-replicator.iml
+/KinesisReplicatorFunction/KinesisConsumer.iml
+/.aws-sam/
+/KinesisReplicatorFunction/target/
+.DS_Store
+*.toml
+/.idea/

@@ -1,0 +1,63 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Template for DynamoDB Global Table
+Parameters:
+  ReplicationCheckpointTableName:
+    Type: String
+    Description: Enter the Replication Checkpoint Table Name
+    Default: "kdsReplicationCheckpoint"
+  KDSActiveRegionConfigTableName:
+    Type: String
+    Description: Enter the Active Region Config Table Name
+    Default: "kdsActiveRegionConfig"
+  PrimaryRegion:
+    Type: String
+    Description: Enter the Primary Region
+    Default: "us-east-1"
+  SecondaryRegion:
+    Type: String
+    Description: Enter the Secondary Region
+    Default: "us-east-2"
+Resources:
+  ReplicationCheckpointTable:
+    Type: AWS::DynamoDB::GlobalTable
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: "streamName"
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "streamName"
+          KeyType: "HASH"
+      TableName: !Ref ReplicationCheckpointTableName
+      Replicas:
+        - Region: !Ref PrimaryRegion
+        - Region: !Ref SecondaryRegion
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      SSESpecification:
+        SSEEnabled: true
+  KDSActiveRegionConfigTable:
+    Type: AWS::DynamoDB::GlobalTable
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: "streamName"
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "streamName"
+          KeyType: "HASH"
+      TableName: !Ref KDSActiveRegionConfigTableName
+      Replicas:
+        - Region: !Ref PrimaryRegion
+        - Region: !Ref SecondaryRegion
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      SSESpecification:
+        SSEEnabled: true
+Outputs:
+  ReplicationCheckpointTableArn:
+    Description: "ReplicationCheckpointTable ARN"
+    Value: !GetAtt ReplicationCheckpointTable.Arn
+  KDSActiveRegionConfigTableArn:
+    Description: "KDSActiveRegionConfigTable ARN"
+    Value: !GetAtt KDSActiveRegionConfigTable.Arn
