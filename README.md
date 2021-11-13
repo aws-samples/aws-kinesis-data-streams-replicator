@@ -1,4 +1,4 @@
-# A Continuous Data Capture(CDC) Solution to AWS Kinesis Data Streams with Cross Region Replication & Checkpointing for Disaster Recovery
+# A Continuous Data Capture(CDC) pipeline to AWS Kinesis Data Streams with Cross Region Replication & Checkpointing for Disaster Recovery
 
 ## Usecase:
 

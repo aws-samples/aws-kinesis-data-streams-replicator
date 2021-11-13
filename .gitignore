@@ -6,3 +6,4 @@
 .DS_Store
 *.toml
 /.idea/
+/README.pdf
