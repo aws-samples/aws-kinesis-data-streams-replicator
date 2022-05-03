@@ -1,77 +1,68 @@
 package consumer;
 
-import com.amazonaws.ClientConfiguration;
-import com.amazonaws.Protocol;
-import com.amazonaws.auth.AWSCredentialsProvider;
-import com.amazonaws.auth.DefaultAWSCredentialsProviderChain;
-import com.amazonaws.services.dynamodbv2.AmazonDynamoDB;
-import com.amazonaws.services.dynamodbv2.AmazonDynamoDBClientBuilder;
-import com.amazonaws.services.dynamodbv2.document.DynamoDB;
-import com.amazonaws.services.dynamodbv2.document.Item;
-import com.amazonaws.services.dynamodbv2.document.Table;
-import com.amazonaws.services.dynamodbv2.document.spec.GetItemSpec;
-import com.amazonaws.services.kinesis.AmazonKinesis;
-import com.amazonaws.services.kinesis.AmazonKinesisClientBuilder;
-import com.amazonaws.services.kinesis.model.PutRecordRequest;
 import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.RequestHandler;
 import com.amazonaws.services.lambda.runtime.events.KinesisEvent;
 import com.amazonaws.services.lambda.runtime.events.StreamsEventResponse;
-import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
-import com.google.gson.JsonObject;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import software.amazon.awssdk.core.SdkBytes;
+import software.amazon.awssdk.http.apache.ApacheHttpClient;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.cloudwatch.CloudWatchClient;
+import software.amazon.awssdk.services.cloudwatch.model.Dimension;
+import software.amazon.awssdk.services.cloudwatch.model.MetricDatum;
+import software.amazon.awssdk.services.cloudwatch.model.PutMetricDataRequest;
+import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
+import software.amazon.awssdk.services.dynamodb.model.*;
+import software.amazon.awssdk.services.kinesis.KinesisClient;
+import software.amazon.awssdk.services.kinesis.model.PutRecordRequest;
 
-import java.nio.ByteBuffer;
-import java.nio.charset.Charset;
 import java.nio.charset.CharsetDecoder;
-import java.util.ArrayList;
-import java.util.List;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+
+import static java.util.Arrays.asList;
+import static software.amazon.awssdk.services.dynamodb.model.ComparisonOperator.EQ;
 
 public class Handler implements RequestHandler<KinesisEvent, StreamsEventResponse> {
 
     private static final Logger logger = LoggerFactory.getLogger(Handler.class);
 
-    private static final Gson gson = new GsonBuilder().setPrettyPrinting().create();
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
-    private static final CharsetDecoder utf8Decoder = Charset.forName("UTF-8").newDecoder();
+    private static final CharsetDecoder utf8Decoder = StandardCharsets.UTF_8.newDecoder();
 
-    private AmazonKinesis kinesisForwarder = null;
-
-    private DynamoDB docClient = null;
+    private KinesisClient kinesisForwarder = null;
+    private DynamoDbClient ddbClient = null;
+    private CloudWatchClient cw = null;
 
     public Handler() {
-        AWSCredentialsProvider provider = new DefaultAWSCredentialsProviderChain();
-        //AWSCredentialsProvider provider = new STSAssumeRoleSessionCredentialsProvider(new DefaultAWSCredentialsProviderChain(), "<RoleToAssumeARN>", "KinesisForwarder");
 
-        //Set max conns to 1 since we use this client serially
-        ClientConfiguration kinesisConfig = new ClientConfiguration();
-        kinesisConfig.setMaxConnections(1);
-        kinesisConfig.setProtocol(Protocol.HTTPS);
-        kinesisConfig.setConnectionTimeout(30000);
-        kinesisConfig.setSocketTimeout(30000);
-
-        this.kinesisForwarder = AmazonKinesisClientBuilder.standard()
-                .withClientConfiguration(kinesisConfig)
-                .withRegion(System.getenv("TARGET_STREAM_REPLICATION_REGION"))
+        kinesisForwarder = KinesisClient.builder()
+                .region(Region.of(System.getenv("TARGET_STREAM_REPLICATION_REGION")))
+                .httpClient(ApacheHttpClient.create())
                 .build();
-
-        AmazonDynamoDB client = AmazonDynamoDBClientBuilder.standard().build();
-        docClient = new DynamoDB(client);
-
+        ddbClient = DynamoDbClient.create();
+        cw = CloudWatchClient.builder()
+                .region(Region.of(System.getenv("TARGET_STREAM_REPLICATION_REGION")))
+                .httpClient(ApacheHttpClient.create())
+                .build();
     }
 
     @Override
     public StreamsEventResponse handleRequest(KinesisEvent kinesisEvent, Context context) {
+        Instant start = Instant.now();
         List<StreamsEventResponse.BatchItemFailure> failures = new ArrayList<>();
         String streamName = getStreamName(kinesisEvent.getRecords().get(0));
         String currentRegion = System.getenv("AWS_REGION");
-        if (isStreamActiveInCurrentRegion(streamName, currentRegion, docClient)) {
-            Table checkpointTable = docClient.getTable(System.getenv("DDB_CHECKPOINT_TABLE_NAME"));
-
+        if (isStreamActiveInCurrentRegion(streamName, currentRegion)) {
             int batchSize = kinesisEvent.getRecords().size();
             AtomicInteger successful = new AtomicInteger();
             AtomicReference<String> currentSequenceNumber = new AtomicReference<>("");
@@ -83,52 +74,92 @@ public class Handler implements RequestHandler<KinesisEvent, StreamsEventRespons
 
                     // Forward to other region
 
-                    PutRecordRequest putRecordRequest = new PutRecordRequest();
-                    putRecordRequest.setStreamName(streamName);
-                    putRecordRequest.setPartitionKey(record.getKinesis().getPartitionKey());
-                    putRecordRequest.setData(ByteBuffer.wrap(actualDataString.getBytes("UTF-8")));
-                    this.kinesisForwarder.putRecord(putRecordRequest);
+                    PutRecordRequest putRecordRequest = PutRecordRequest.builder()
+                            .streamName(streamName)
+                            .partitionKey(record.getKinesis().getPartitionKey())
+                            .data(SdkBytes.fromString(actualDataString, StandardCharsets.UTF_8))
+                            .build();
+                    kinesisForwarder.putRecord(putRecordRequest);
+                    ddbClient.putItem(buildItem(streamName, actualDataString));
 
-                    // Checkpoint
-                    Item item = transform(streamName, actualDataString);
-
-                    checkpointTable.putItem(item);
                     successful.getAndIncrement();
                 }
             } catch (Exception e) {
                 failures.add(StreamsEventResponse.BatchItemFailure.builder().withItemIdentifier(currentSequenceNumber.get()).build());
                 logger.error("Error while processing batch", e);
             }
-            logger.info("Total Batch Size: {}, Successfully Processed: {}", batchSize, successful.get());
+            Instant end = Instant.now();
+            int successfullyProcessed = successful.get();
+            long replicationLatency = Duration.between(start, end).toSeconds();
+            logger.info("TotalBatchSize {} Successful {} TimeTakenSeconds {}", batchSize, successfullyProcessed, replicationLatency);
+            try {
+                MetricDatum throughputMetricData = MetricDatum.builder()
+                        .metricName("ThroughPut")
+                        .dimensions(Dimension.builder()
+                                .name("StreamName")
+                                .value(streamName)
+                                .build())
+                        .value(Double.valueOf(successfullyProcessed))
+                        .build();
+                MetricDatum replicationLatencyMetricData = MetricDatum.builder()
+                        .metricName("ReplicationLatency")
+                        .dimensions(Dimension.builder()
+                                .name("StreamName")
+                                .value(streamName)
+                                .build())
+                        .value(Double.valueOf(replicationLatency))
+                        .build();
+                cw.putMetricData(PutMetricDataRequest.builder()
+                                .namespace("KinesisCrossRegionReplication")
+                                .metricData(asList(throughputMetricData, replicationLatencyMetricData))
+                        .build());
+            } catch (Throwable e) {
+                logger.error("Error while publishing metric to cloudwatch");
+            }
         } else {
             logger.info("Stream {} is not active in the current region", streamName);
         }
         return StreamsEventResponse.builder().withBatchItemFailures(failures).build();
     }
 
-    private boolean isStreamActiveInCurrentRegion(String streamName, String currentRegion, DynamoDB docClient) {
+    private PutItemRequest buildItem(String streamName, String actualDataString) throws JsonProcessingException {
+        Map<String, AttributeValue> item = new HashMap<>();
+        item.put("streamName", AttributeValue.builder().s(streamName).build());
+        item.put("lastReplicatedCommitTimestamp", AttributeValue.builder().s(objectMapper.readTree(actualDataString).at("/commitTimestamp").asText()).build());
+        return PutItemRequest.builder()
+                .tableName(System.getenv("DDB_CHECKPOINT_TABLE_NAME"))
+                .item(item)
+                .build();
+    }
+
+    private boolean isStreamActiveInCurrentRegion(String streamName, String currentRegion) {
         try {
-            Table activeRegionConfigTable = docClient.getTable(System.getenv("DDB_ACTIVE_REGION_CONFIG_TABLE_NAME"));
 
-            GetItemSpec spec = new GetItemSpec().withPrimaryKey("streamName", streamName);
+            Map<String, Condition> keyConditions = Collections.singletonMap("streamName", Condition.builder()
+                            .comparisonOperator(EQ)
+                            .attributeValueList(AttributeValue.builder().s(streamName).build())
+                    .build());
+            QueryResponse queryResponse = ddbClient.query(QueryRequest.builder()
+                    .tableName(System.getenv("DDB_ACTIVE_REGION_CONFIG_TABLE_NAME"))
+                    .keyConditions(keyConditions)
+                    .attributesToGet("activeRegion")
+                    .build());
 
-            Item item = activeRegionConfigTable.getItem(spec);
-
-            String activeRegion = item.get("activeRegion").toString();
-
-            return currentRegion.equalsIgnoreCase(activeRegion);
+            if(!queryResponse.hasItems()) {
+                logger.warn("Stream is not configured for cross region replication");
+                return false;
+            } else {
+                if (queryResponse.count() > 1) {
+                    logger.error("A stream cannot be active in more than one region");
+                    return false;
+                }
+                AttributeValue activeRegionAttributeValue = queryResponse.items().get(0).get("activeRegion");
+                return currentRegion.equalsIgnoreCase(activeRegionAttributeValue.s());
+            }
         } catch (Exception e) {
             logger.error("Error while attempting to fetch current stream's active region");
         }
-        return true;
-    }
-
-    private Item transform(String streamName, String actualDataString) {
-        String commitTimestamp = gson.fromJson(actualDataString, JsonObject.class).get("commitTimestamp").getAsString();
-
-        return new Item()
-                .withPrimaryKey("streamName", streamName)
-                .withString("lastReplicatedCommitTimestamp", commitTimestamp);
+        return false;
     }
 
     private String getStreamName(KinesisEvent.KinesisEventRecord record) {
