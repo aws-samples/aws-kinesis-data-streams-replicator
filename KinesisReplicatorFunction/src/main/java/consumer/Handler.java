@@ -66,6 +66,8 @@ public class Handler implements RequestHandler<KinesisEvent, StreamsEventRespons
             int batchSize = kinesisEvent.getRecords().size();
             AtomicInteger successful = new AtomicInteger();
             AtomicReference<String> currentSequenceNumber = new AtomicReference<>("");
+            String lastReplicatedTimestamp = null;
+            Instant lastApproximateArrivalInstant = null;
             try {
                 for (KinesisEvent.KinesisEventRecord record : kinesisEvent.getRecords()) {
                     currentSequenceNumber.getAndSet(record.getKinesis().getSequenceNumber());
@@ -81,7 +83,8 @@ public class Handler implements RequestHandler<KinesisEvent, StreamsEventRespons
                             .build();
                     kinesisForwarder.putRecord(putRecordRequest);
                     ddbClient.putItem(buildItem(streamName, actualDataString));
-
+                    lastReplicatedTimestamp = objectMapper.readTree(actualDataString).at("/commitTimestamp").asText();
+                    lastApproximateArrivalInstant = record.getKinesis().getApproximateArrivalTimestamp().toInstant();
                     successful.getAndIncrement();
                 }
             } catch (Exception e) {
@@ -90,8 +93,9 @@ public class Handler implements RequestHandler<KinesisEvent, StreamsEventRespons
             }
             Instant end = Instant.now();
             int successfullyProcessed = successful.get();
-            long replicationLatency = Duration.between(start, end).toSeconds();
-            logger.info("TotalBatchSize {} Successful {} TimeTakenSeconds {}", batchSize, successfullyProcessed, replicationLatency);
+            long timeTakenSeconds = Duration.between(start, end).toSeconds();
+            long replicationLag = Duration.between(lastApproximateArrivalInstant, end).toSeconds();
+            logger.info("TotalBatchSize {} Successful {} TimeTakenSeconds {} ReplicationLag {}", batchSize, successfullyProcessed, timeTakenSeconds, replicationLag);
             try {
                 MetricDatum throughputMetricData = MetricDatum.builder()
                         .metricName("ThroughPut")
@@ -99,19 +103,19 @@ public class Handler implements RequestHandler<KinesisEvent, StreamsEventRespons
                                 .name("StreamName")
                                 .value(streamName)
                                 .build())
-                        .value(Double.valueOf(successfullyProcessed))
+                        .value((double) successfullyProcessed)
                         .build();
                 MetricDatum replicationLatencyMetricData = MetricDatum.builder()
-                        .metricName("ReplicationLatency")
+                        .metricName("ReplicationLagSeconds")
                         .dimensions(Dimension.builder()
                                 .name("StreamName")
                                 .value(streamName)
                                 .build())
-                        .value(Double.valueOf(replicationLatency))
+                        .value((double) replicationLag)
                         .build();
                 cw.putMetricData(PutMetricDataRequest.builder()
-                                .namespace("KinesisCrossRegionReplication")
-                                .metricData(asList(throughputMetricData, replicationLatencyMetricData))
+                        .namespace("KinesisCrossRegionReplication")
+                        .metricData(asList(throughputMetricData, replicationLatencyMetricData))
                         .build());
             } catch (Throwable e) {
                 logger.error("Error while publishing metric to cloudwatch");
@@ -136,8 +140,8 @@ public class Handler implements RequestHandler<KinesisEvent, StreamsEventRespons
         try {
 
             Map<String, Condition> keyConditions = Collections.singletonMap("streamName", Condition.builder()
-                            .comparisonOperator(EQ)
-                            .attributeValueList(AttributeValue.builder().s(streamName).build())
+                    .comparisonOperator(EQ)
+                    .attributeValueList(AttributeValue.builder().s(streamName).build())
                     .build());
             QueryResponse queryResponse = ddbClient.query(QueryRequest.builder()
                     .tableName(System.getenv("DDB_ACTIVE_REGION_CONFIG_TABLE_NAME"))
@@ -145,7 +149,7 @@ public class Handler implements RequestHandler<KinesisEvent, StreamsEventRespons
                     .attributesToGet("activeRegion")
                     .build());
 
-            if(!queryResponse.hasItems()) {
+            if (!queryResponse.hasItems()) {
                 logger.warn("Stream is not configured for cross region replication");
                 return false;
             } else {

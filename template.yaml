@@ -107,7 +107,7 @@ Resources:
   KinesislambdaEventSourceMapping:
     Type: AWS::Lambda::EventSourceMapping
     Properties:
-      BatchSize: 1000
+      BatchSize: 8000
       BisectBatchOnFunctionError: false
       Enabled: true
       EventSourceArn: !GetAtt KinesisStreamConsumer.ConsumerARN
