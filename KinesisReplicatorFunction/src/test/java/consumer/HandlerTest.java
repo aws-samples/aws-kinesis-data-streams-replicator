@@ -1,25 +1,17 @@
 package consumer;
 
-import com.amazonaws.services.lambda.runtime.ClientContext;
-import com.amazonaws.services.lambda.runtime.CognitoIdentity;
 import com.amazonaws.services.lambda.runtime.Context;
-import com.amazonaws.services.lambda.runtime.LambdaLogger;
 import com.amazonaws.services.lambda.runtime.events.KinesisEvent;
 import com.amazonaws.services.lambda.runtime.events.KinesisEvent.KinesisEventRecord;
 import com.amazonaws.services.lambda.runtime.events.KinesisEvent.Record;
-import com.amazonaws.util.StringUtils;
-import com.google.gson.Gson;
-import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
-import org.assertj.core.api.Assertions;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.Test;
 
-import java.nio.ByteBuffer;
 import java.nio.charset.Charset;
 import java.util.Base64;
 import java.util.Collections;
 
-import static java.util.Arrays.asList;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class HandlerTest {
@@ -41,10 +33,9 @@ public class HandlerTest {
     }
 
     @Test
-    public void testJsonParsing() {
+    public void testJsonParsing() throws JsonProcessingException {
         String jsonString = "{ \"key\": 2049761200, \"commitTimestamp\": \"2021-10-12T19:16:14Z\"}";
-        JsonObject jsonObject = new Gson().fromJson(jsonString, JsonObject.class);
-        assertThat(jsonObject.get("commitTimestamp").getAsString()).isEqualTo("2021-10-12T19:16:14Z");
+        assertThat(new ObjectMapper().readTree(jsonString).at("/commitTimestamp").asText()).isEqualTo("2021-10-12T19:16:14Z");
     }
 
     @Test

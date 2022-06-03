@@ -81,6 +81,14 @@ Resources:
                   - kinesis:PutRecord
                 Resource:
                   - !Sub 'arn:aws:kinesis:*:${AWS::AccountId}:stream/${InputStreamName}'
+        - PolicyName: CloudWatchMetrics
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
   KinesisReplicatorFunction:
     Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
     Properties:
@@ -90,6 +98,7 @@ Resources:
       Role: !GetAtt LambdaRole.Arn
       Runtime: java11
       MemorySize: 512
+      Timeout: 900
       Environment: # More info about Env Vars: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#environment-object
         Variables:
           DDB_CHECKPOINT_TABLE_NAME: !Ref CheckpointTableName
@@ -98,7 +107,7 @@ Resources:
   KinesislambdaEventSourceMapping:
     Type: AWS::Lambda::EventSourceMapping
     Properties:
-      BatchSize: 1000
+      BatchSize: 8000
       BisectBatchOnFunctionError: false
       Enabled: true
       EventSourceArn: !GetAtt KinesisStreamConsumer.ConsumerARN
